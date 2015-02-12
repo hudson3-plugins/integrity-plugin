@@ -100,4 +100,9 @@
       <distribution>repo</distribution>
     </license>
   </licenses>
+  
+  <properties>
+	<hudsonTags>scm</hudsonTags>
+  </properties>  
+  
 </project>
