@@ -176,7 +176,7 @@ public class IntegrityChangeLogSet extends ChangeLogSet<IntegrityChangeLog>
 
 		/**
 		 * Returns the author responsible for the change 
-		 * Note: This user must be defined in Hudson/Hudson!
+		 * Note: This user must be defined in Hudson/Jenkins!
 		 */
 		@Exported
 		public User getAuthor() 
