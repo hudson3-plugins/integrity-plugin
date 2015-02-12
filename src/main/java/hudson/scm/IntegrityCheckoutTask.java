@@ -14,17 +14,20 @@ import java.util.List;
 import java.util.Vector;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import com.mks.api.response.APIException;
-import com.mks.api.util.Base64;
 
 public class IntegrityCheckoutTask implements FileCallable<Boolean> 
 {
 	private static final long serialVersionUID = 1240357991626897900L;
+	private static final Logger LOGGER = Logger.getLogger("IntegritySCM");
 	private static final int CHECKOUT_TRESHOLD = 500;	
 	private final List<Hashtable<CM_PROJECT, Object>> projectMembersList;
 	private final List<String> dirList;
@@ -34,14 +37,7 @@ public class IntegrityCheckoutTask implements FileCallable<Boolean>
 	private final String alternateWorkspaceDir;
 	private final boolean fetchChangedWorkspaceFiles;
 	private final BuildListener listener;
-	// API connection information
-	private String ipHostName;
-	private String hostName;
-	private int ipPort = 0;
-	private int port;
-	private boolean secure;
-    private String userName;
-    private String password;
+	private IntegrityConfigurable integrityConfig;
     // Checksum Hash
     private ConcurrentHashMap<String, String> checksumHash;
     // Counts
@@ -50,8 +46,6 @@ public class IntegrityCheckoutTask implements FileCallable<Boolean>
     private int dropCount;
     private int fetchCount;
     private int checkoutThreadPoolSize;
-    
-	
 	
 	/**
 	 * Hudson supports building on distributed machines, and the SCM plugin must 
@@ -65,9 +59,8 @@ public class IntegrityCheckoutTask implements FileCallable<Boolean>
 	 * @param fetchChangedWorkspaceFiles Toggles whether or not to calculate checksums, so if changed then it will be overwritten
 	 * @param listener The Hudson build listener
 	 */
-	public IntegrityCheckoutTask(List<Hashtable<CM_PROJECT, Object>> projectMembersList, List<String> dirList,
-									String alternateWorkspaceDir, String lineTerminator, boolean restoreTimestamp,
-									boolean cleanCopy, boolean fetchChangedWorkspaceFiles,int checkoutThreadPoolSize, BuildListener listener)
+	public IntegrityCheckoutTask(List<Hashtable<CM_PROJECT, Object>> projectMembersList, List<String> dirList, String alternateWorkspaceDir, String lineTerminator, boolean restoreTimestamp,
+									boolean cleanCopy, boolean fetchChangedWorkspaceFiles,int checkoutThreadPoolSize, BuildListener listener, IntegrityConfigurable integrityConfig)
 	{
 		this.projectMembersList = projectMembersList;
 		this.dirList = dirList;
@@ -77,65 +70,15 @@ public class IntegrityCheckoutTask implements FileCallable<Boolean>
 		this.cleanCopy = cleanCopy;
 		this.fetchChangedWorkspaceFiles = fetchChangedWorkspaceFiles;
 		this.listener = listener;
-		this.ipHostName = "";
-		this.ipPort = 0;
-		this.hostName = "";
-		this.port = 7001;
-		this.secure = false;
-		this.userName = "";
-		this.password = "";
+		this.integrityConfig = integrityConfig;
 		this.addCount = 0;
 		this.updateCount = 0;
 		this.dropCount = 0;
 		this.fetchCount = 0;
 		this.checkoutThreadPoolSize = checkoutThreadPoolSize;
 		this.checksumHash = new ConcurrentHashMap<String, String>();
-		Logger.debug("Integrity Checkout Task Created!");
+		LOGGER.fine("Integrity Checkout Task Created!");
 	}
-	
-	/**
-	 * Helper function to initialize all the variables needed to establish an APISession
-	 * @param ipHostName Integration Point Hostname
-	 * @param ipPort Integration Point Port
-	 * @param hostName Integrity Server Hostname
-	 * @param port Integrity Server Port
-	 * @param secure Toggles whether Integrity Server is SSL enabled
-	 * @param userName Username to connect to the Integrity Server
-	 * @param password Password for the Username connection to the Integrity Server
-	 */
-	public void initAPIVariables(String ipHostName, int ipPort, String hostName, int port, boolean secure, String userName, String password)
-	{
-		this.ipHostName = ipHostName;
-		this.ipPort = ipPort;
-		this.hostName = hostName;
-		this.port = port;
-		this.secure = secure;
-		this.userName = userName;
-		this.password = password;
-	}
-	
-    /**
-     * Creates an authenticated API Session against the Integrity Server
-     * @return An authenticated API Session
-     */
-    public APISession createAPISession()
-    {
-    	// Attempt to open a connection to the Integrity Server
-    	try
-    	{
-    		Logger.debug("Creating Integrity API Session...");
-    		return new APISession(ipHostName, ipPort, hostName, port, userName, Base64.decode(password), secure);
-    	}
-    	catch(APIException aex)
-    	{
-    		Logger.error("API Exception caught...");
-    		ExceptionHandler eh = new ExceptionHandler(aex);
-    		Logger.error(eh.getMessage());
-    		Logger.debug(eh.getCommand() + " returned exit code " + eh.getExitCode());
-    		Logger.fatal(aex);
-    		return null;
-    	}				
-    }
 	
 	/**
 	 * Creates the folder structure for the project's contents allowing empty folders to be created
@@ -149,7 +92,7 @@ public class IntegrityCheckoutTask implements FileCallable<Boolean>
 			File dir = new File(workspace + folders.next());
 			if( ! dir.isDirectory() )
 			{
-				Logger.debug("Creating folder: " + dir.getAbsolutePath());
+				LOGGER.fine("Creating folder: " + dir.getAbsolutePath());
 				dir.mkdirs();
 			}
 		}
@@ -175,7 +118,7 @@ public class IntegrityCheckoutTask implements FileCallable<Boolean>
         @Override
         protected Integer initialValue()
         {
-            Logger.debug("Trying to retrieve initial value for open file handler" );
+            LOGGER.fine("Trying to retrieve initial value for open file handler" );
             return new Integer(1);
         }
 	}
@@ -185,13 +128,7 @@ public class IntegrityCheckoutTask implements FileCallable<Boolean>
 	 */
     private static class ThreadLocalAPISession extends ThreadLocal<APISession>
     {
-        final String ipHost;
-        final int ipPortNum;
-        final String host;
-        final int portNum;
-        final String user;
-        final String paswd;
-        final boolean secure;
+        IntegrityConfigurable integrityConfig;
         // Using a thread safe Vector instead of a List
         private Vector<APISession> sessions = new Vector<APISession>();
    
@@ -205,15 +142,9 @@ public class IntegrityCheckoutTask implements FileCallable<Boolean>
          * @param paswd Integrity Server user's password
          * @param secure Flag to determine whether or not secure sockets are in use
          */
-        public ThreadLocalAPISession(String ipHost, int ipPortNum, String host, int portNum, String user, String paswd, boolean secure)
+        public ThreadLocalAPISession(IntegrityConfigurable integrityConfig)
         {
-            this.ipHost = ipHost;
-            this.ipPortNum = ipPortNum;
-            this.host = host;
-            this.portNum = portNum;
-            this.user = user;
-            this.paswd = paswd;
-            this.secure = secure;
+        	this.integrityConfig = integrityConfig;
         }
 
         /**
@@ -226,11 +157,12 @@ public class IntegrityCheckoutTask implements FileCallable<Boolean>
             {
                 try
                 {
+                	LOGGER.fine("Terminating threaded API Sessions...");
                     session.Terminate();
                 }
                 catch(Exception ex)
                 {
-                    Logger.debug("Error while shuting down thread API session: " + ex.getMessage());
+                    LOGGER.fine("Error while shuting down thread API session: " + ex.getMessage());
                 }
             }
             super.remove();
@@ -242,18 +174,16 @@ public class IntegrityCheckoutTask implements FileCallable<Boolean>
         @Override
         protected APISession initialValue() 
         {
-            Logger.debug("Trying to initialize new thread session");
-            try 
-            {
-                APISession session = new APISession(ipHost, ipPortNum, host, portNum, user, paswd, secure);
-                Logger.debug("Initialized thread session: " + session.toString());
-                sessions.add(session);
-                return session;
-            }
-            catch (APIException e) 
-            {
-                throw new RuntimeException(e);
-            }
+        	APISession api = APISession.create(integrityConfig);
+        	if( null != api )
+        	{
+        		sessions.add(api);
+        		return api;
+        	}
+        	else
+        	{
+        		return null;
+        	}
         }
     }
     
@@ -287,20 +217,39 @@ public class IntegrityCheckoutTask implements FileCallable<Boolean>
         public Void call() throws Exception 
         {
             APISession api = apiSession.get();
-            // Check to see if we need to release the APISession to clear some file handles
-            Logger.debug("API open file handles: " + openFileHandler.get() );
-            if( openFileHandler.get() >= CHECKOUT_TRESHOLD  )
+            if( null != api )
             {
-                Logger.debug("Checkout threshold reached for session " + api.toString() + ", refreshing API session");
-                api.refreshAPISession();
-                openFileHandler.set(1);
+            	// Check to see if we need to release the APISession to clear some file handles
+            	LOGGER.fine("API open file handles: " + openFileHandler.get() );
+            	if( openFileHandler.get() >= CHECKOUT_TRESHOLD  )
+            	{
+            		LOGGER.fine("Checkout threshold reached for session " + api.toString() + ", refreshing API session");
+            		api.refreshAPISession();
+            		openFileHandler.set(1);
+            	}
+            	LOGGER.fine("Checkout on API thread: " + api.toString());
+            	try
+            	{
+            		IntegrityCMMember.checkout(api, configPath, memberID, memberRev, targetFile, restoreTimestamp, lineTerminator);
+            	}
+            	catch( APIException aex )
+            	{
+            		LOGGER.severe("API Exception caught...");
+            		ExceptionHandler eh = new ExceptionHandler(aex);
+            		LOGGER.severe(eh.getMessage());
+            		LOGGER.fine(eh.getCommand() + " returned exit code " + eh.getExitCode());
+            		throw new Exception(eh.getMessage());
+            	}
+            
+            	openFileHandler.set( openFileHandler.get() + 1);
+            	if(calculateChecksum)
+            	{
+            		checksumHash.put(memberName, IntegrityCMMember.getMD5Checksum(targetFile));
+            	}
             }
-            Logger.debug("Checkout on API thread: " + api.toString());
-            IntegrityCMMember.checkout(api, configPath, memberID, memberRev, targetFile, restoreTimestamp, lineTerminator);
-            openFileHandler.set( openFileHandler.get() + 1);
-            if(calculateChecksum)
+            else
             {
-                checksumHash.put(memberName, IntegrityCMMember.getMD5Checksum(targetFile));
+            	throw new Exception("Failed to create APISession!");
             }
             return null;
         }
@@ -317,7 +266,7 @@ public class IntegrityCheckoutTask implements FileCallable<Boolean>
 		// Convert the file object to a hudson FilePath (helps us with workspace.deleteContents())
 		FilePath workspace = new FilePath(checkOutDir.isAbsolute() ? checkOutDir : new File(workspaceFile.getAbsolutePath() + IntegritySCM.FS + checkOutDir.getPath()));
 		listener.getLogger().println("Checkout directory is " + workspace);
-		final ThreadLocalAPISession generateAPISession = new ThreadLocalAPISession(ipHostName, ipPort, hostName, port, userName, Base64.decode(password), secure);
+		final ThreadLocalAPISession generateAPISession = new ThreadLocalAPISession(integrityConfig);
 		final ThreadLocalOpenFileHandler openFileHandler = new ThreadLocalOpenFileHandler();
         ExecutorService executor = Executors.newFixedThreadPool(checkoutThreadPoolSize);
         @SuppressWarnings("rawtypes")
@@ -329,7 +278,7 @@ public class IntegrityCheckoutTask implements FileCallable<Boolean>
 			if( cleanCopy )
 			{ 
 				listener.getLogger().println("A clean copy is requested; deleting contents of " + workspace); 
-				Logger.debug("Deleting contents of workspace " + workspace); 
+				LOGGER.fine("Deleting contents of workspace " + workspace); 
 				workspace.deleteContents();
 				listener.getLogger().println("Populating clean workspace...");
 			}
@@ -351,40 +300,40 @@ public class IntegrityCheckoutTask implements FileCallable<Boolean>
 			
 				if( cleanCopy && deltaFlag != 3 )
 				{
-					Logger.debug("Attempting to checkout file: " + targetFile.getAbsolutePath() + " at revision " + memberRev);		
+					LOGGER.fine("Attempting to checkout file: " + targetFile.getAbsolutePath() + " at revision " + memberRev);		
 					coThreads.add(executor.submit(new CheckOutTask(generateAPISession, openFileHandler, memberName, configPath, memberID, memberRev, targetFile, fetchChangedWorkspaceFiles)));			
 				}
 				else if( deltaFlag == 0 && fetchChangedWorkspaceFiles && checksum.length() > 0 )
 				{
 					if( ! checksum.equals(IntegrityCMMember.getMD5Checksum(targetFile)) )
 					{
-						Logger.debug("Attempting to restore changed workspace file: " + targetFile.getAbsolutePath() + " to revision " + memberRev);
+						LOGGER.fine("Attempting to restore changed workspace file: " + targetFile.getAbsolutePath() + " to revision " + memberRev);
 						coThreads.add(executor.submit(new CheckOutTask(generateAPISession, openFileHandler, memberName, configPath, memberID, memberRev, targetFile, false)));
 						fetchCount++;
 					}
 				}
 				else if( deltaFlag == 1 )
 				{
-					Logger.debug("Attempting to get new file: " + targetFile.getAbsolutePath() + " at revision " + memberRev);
+					LOGGER.fine("Attempting to get new file: " + targetFile.getAbsolutePath() + " at revision " + memberRev);
 					coThreads.add(executor.submit(new CheckOutTask(generateAPISession, openFileHandler, memberName, configPath, memberID, memberRev, targetFile, fetchChangedWorkspaceFiles)));
 					addCount++;									
 				}
 				else if( deltaFlag == 2 )
 				{
-					Logger.debug("Attempting to update file: " + targetFile.getAbsolutePath() + " to revision " + memberRev);
+					LOGGER.fine("Attempting to update file: " + targetFile.getAbsolutePath() + " to revision " + memberRev);
 					coThreads.add(executor.submit(new CheckOutTask(generateAPISession, openFileHandler, memberName, configPath, memberID, memberRev, targetFile, fetchChangedWorkspaceFiles)));
 					updateCount++;														
 				}
 				else if( deltaFlag == 3 )					
 				{
-					Logger.debug("Attempting to drop file: " + targetFile.getAbsolutePath() + " was at revision " + memberRev);
+					LOGGER.fine("Attempting to drop file: " + targetFile.getAbsolutePath() + " was at revision " + memberRev);
 					dropCount++;
 					if( targetFile.exists() && !targetFile.delete() )
 					{
 						listener.getLogger().println("Failed to clean up workspace file " + targetFile.getAbsolutePath() + "!");
 						return false;
 					}
-				}
+				}				
 			}
 			
             int checkoutMembers = 0;
@@ -397,22 +346,47 @@ public class IntegrityCheckoutTask implements FileCallable<Boolean>
                 Iterator<Future> iter = coThreads.iterator();
                 while (iter.hasNext()) 
                 {
-                    Future<?> future = iter.next();
-                    if(future.isCancelled())
+                    Future<?> future = iter.next();                    
+                    if( future.isCancelled() )
                     {
                         listener.getLogger().println("Checkout thread " + future.toString() + " was cancelled");
                         canceledMembers++;
                         iter.remove();
                     }
-                    else if(future.isDone())
+                    else if( future.isDone() )
                     {
+                    	// Look for the result of this thread's execution...
+                        try 
+                        {
+    						future.get();
+    					} 
+                        catch( ExecutionException e ) 
+                        {
+                    		listener.getLogger().println(e.getMessage());
+                    		LOGGER.log(Level.SEVERE, "ExecutionException", e);
+                    		StackTraceElement[] st = e.getStackTrace();
+                    		for( int i = 0; i < st.length; i++ )
+                    		{
+                    			LOGGER.severe("\tat " + st[i].getClassName() + "." + st[i].getMethodName() + "(" + st[i].getFileName() + ":" + st[i].getLineNumber() + ")");
+                    		}
+                    		
+                    		if( null != e.getMessage() && e.getMessage().indexOf("Unbuffered entity enclosing request can not be repeated") > 0 )
+                    		{
+                    			// ignore...
+                    		}
+                    		else
+                    		{
+                    			return false;
+                    		}
+    					}
+                        
                         checkoutMembers++;  
                         iter.remove();
                     }
                 }
                 if(previousCount != (checkoutMembers + canceledMembers))
                 {
-                    Logger.debug("Checkout process: " + checkoutMembers + " of " + totalMembers + (canceledMembers>0? "(Canceled: " +  canceledMembers +  ")":"") );
+                    LOGGER.fine("Checkout process: " + checkoutMembers + " of " + totalMembers + (canceledMembers>0? "(Canceled: " +  canceledMembers +  ")":"") );
                 }
                 previousCount = checkoutMembers + canceledMembers;
                 // Wait 2 seconds a check again if all threads are done
@@ -438,13 +412,13 @@ public class IntegrityCheckoutTask implements FileCallable<Boolean>
 		}
 		catch( InterruptedException iex )
 		{
-    		Logger.error("Interrupted Exception caught...");
+    		LOGGER.severe("Interrupted Exception caught...");
     		listener.getLogger().println("An Interrupted Exception was caught!"); 
-    		Logger.error(iex.getMessage());
+    		LOGGER.severe(iex.getMessage());
     		listener.getLogger().println(iex.getMessage());
     		listener.getLogger().println("Failed to clean up workspace (" + workspace + ") contents!");
     		return false;			
-		}
+		}	
 		finally
 		{
 		    if( generateAPISession != null )
